@@ -11,20 +11,19 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Database Connection
-const db = mysql.createConnection({
+// Create connection pool instead of single connection
+const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'userdb'
+  database: process.env.DB_NAME || 'userdb',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-db.connect((err) => {
-  if (err) {
-    console.error('Database connection failed:', err.stack);
-    return;
-  }
-  console.log('Connected to database.');
-});
+// Convert pool to use promises
+const promisePool = pool.promise();
 
 // Routes
 app.get('/', (req, res) => {
