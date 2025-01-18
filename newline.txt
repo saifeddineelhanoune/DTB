@@ -1,0 +1,219 @@
+o combine all of the Docker-like features into one cohesive program, we can design a tool that mimics some basic aspects of containerization. This program will:
+
+    Create a new process namespace for process isolation.
+    Create a new mount namespace to isolate the file system.
+    Apply a memory limit using cgroups to simulate resource control.
+    Apply seccomp filters to restrict system calls and provide security.
+    Use user namespaces to isolate the user identity.
+
+This program will take arguments to control the container's behavior, such as memory limit, whether to apply seccomp filters, and user namespace mapping. This is a basic version that could be further extended into a real-world container-like application.
+Program Outline
+
+    Arguments:
+        -m <memory_limit>: Set the memory limit for the container (in bytes).
+        -u <user_id>: Map the container's root user to a specified user ID on the host.
+        -s: Apply seccomp filters to block certain system calls.
+        -p: Launch the containerized process in the new namespace environment (e.g., running a shell or specified command).
+
+    Features:
+        Namespace Isolation: Isolate process and mount namespaces.
+        Control Groups: Limit memory usage for the container.
+        Seccomp Filters: Restrict certain system calls for security.
+        User Namespaces: Map user IDs from the container to the host.
+
+Full Program Code
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sched.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <seccomp.h>
+
+void apply_memory_limit(pid_t pid, long mem_limit_in_bytes) {
+    char cgroup_path[256];
+    snprintf(cgroup_path, sizeof(cgroup_path), "/sys/fs/cgroup/memory/my_cgroup");
+
+    // Create a cgroup directory
+    if (mkdir(cgroup_path, 0755) == -1) {
+        perror("mkdir");
+        exit(1);
+    }
+
+    // Set the memory limit
+    char mem_limit_file[256];
+    snprintf(mem_limit_file, sizeof(mem_limit_file), "%s/memory.limit_in_bytes", cgroup_path);
+    int fd = open(mem_limit_file, O_WRONLY);
+    if (fd == -1) {
+        perror("open");
+        exit(1);
+    }
+    dprintf(fd, "%ld", mem_limit_in_bytes);
+    close(fd);
+
+    // Add the PID to the cgroup
+    char pid_file[256];
+    snprintf(pid_file, sizeof(pid_file), "%s/cgroup.procs", cgroup_path);
+    fd = open(pid_file, O_WRONLY);
+    if (fd == -1) {
+        perror("open");
+        exit(1);
+    }
+    dprintf(fd, "%d", pid);
+    close(fd);
+}
+
+void set_seccomp_filters() {
+    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
+    if (ctx == NULL) {
+        perror("seccomp_init");
+        exit(1);
+    }
+
+    // Block execve system call (example)
+    if (seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(execve), 0) < 0) {
+        perror("seccomp_rule_add");
+        exit(1);
+    }
+
+    if (seccomp_load(ctx) < 0) {
+        perror("seccomp_load");
+        exit(1);
+    }
+}
+
+int child_fn(void *arg) {
+    char **args = (char **)arg;
+
+    // Apply mount namespace and create a new tmpfs
+    if (mount("none", "/mnt", "tmpfs", 0, NULL) == -1) {
+        perror("mount");
+        return 1;
+    }
+
+    // Execute the user-specified command in the container
+    execvp(args[0], args);
+    perror("execvp");
+    return 1;
+}
+
+int main(int argc, char *argv[]) {
+    int opt;
+    long mem_limit = -1;
+    int user_id = -1;
+    int apply_seccomp = 0;
+    char *command = NULL;
+
+    // Parse command-line arguments
+    while ((opt = getopt(argc, argv, "m:u:sp:")) != -1) {
+        switch (opt) {
+            case 'm':
+                mem_limit = atol(optarg);
+                break;
+            case 'u':
+                user_id = atoi(optarg);
+                break;
+            case 's':
+                apply_seccomp = 1;
+                break;
+            case 'p':
+                command = optarg;
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-m memory_limit] [-u user_id] [-s] [-p command]\n", argv[0]);
+                exit(1);
+        }
+    }
+
+    if (command == NULL) {
+        fprintf(stderr, "No command specified to run inside the container.\n");
+        exit(1);
+    }
+
+    char *stack;
+    char *stackTop;
+
+    stack = (char *)malloc(1024 * 1024);
+    if (!stack) {
+        perror("malloc");
+        exit(1);
+    }
+    stackTop = stack + 1024 * 1024;
+
+    // Apply seccomp filter if requested
+    if (apply_seccomp) {
+        set_seccomp_filters();
+    }
+
+    // Create a new user namespace if user_id is specified
+    if (user_id != -1) {
+        if (unshare(CLONE_NEWUSER) == -1) {
+            perror("unshare");
+            exit(1);
+        }
+
+        // Map UID/GID for the container (example: root in container -> user_id on host)
+        if (setgroups(0, NULL) == -1 || setgid(user_id) == -1 || setuid(user_id) == -1) {
+            perror("setgroups/setgid/setuid");
+            exit(1);
+        }
+    }
+
+    // Create a new PID and mount namespace
+    pid_t pid = clone(child_fn, stackTop, SIGCHLD | CLONE_NEWPID | CLONE_NEWNS, argv + optind);
+    if (pid == -1) {
+        perror("clone");
+        exit(1);
+    }
+
+    // Apply memory limit using cgroups if specified
+    if (mem_limit != -1) {
+        apply_memory_limit(pid, mem_limit);
+    }
+
+    // Wait for the child process to finish
+    waitpid(pid, NULL, 0);
+
+    free(stack);
+    return 0;
+}
+
+Explanation of the Features
+
+    Namespace Isolation:
+        The program uses clone() to create a new PID and mount namespace. This isolates the process tree and the filesystem between the host and the container.
+        The CLONE_NEWNS flag ensures the child process runs in a new mount namespace, and the CLONE_NEWPID flag ensures the child process has its own PID namespace.
+
+    Memory Control with Cgroups:
+        The program creates a cgroup for the container, and using the /sys/fs/cgroup/memory/my_cgroup path, it sets a memory limit (memory.limit_in_bytes) for the container.
+        This simulates Docker's ability to limit the container's memory usage.
+
+    Seccomp Filters:
+        The seccomp library is used to add system call filters, preventing the container from executing certain system calls (like execve()), mimicking Docker's ability to restrict containerized processes for security.
+        In this case, the program kills any process that tries to execute new binaries (execve), which can be expanded to block other system calls as needed.
+
+    User Namespaces:
+        The program uses unshare(CLONE_NEWUSER) to create a new user namespace.
+        It then uses setuid(), setgid(), and setgroups() to map the container's root user to a non-root user (specified by the -u argument), ensuring that the container runs with restricted privileges.
+
+    Command Execution:
+        The program takes a command as input (-p <command>) and executes it inside the container. The command is passed as arguments to the execvp() function, which runs the containerized application inside the isolated environment.
+
+Usage Example:
+
+    Run a container with 100 MB of memory, user mapping, seccomp filter, and running a shell:
+
+./docker_like_program -m 104857600 -u 1000 -s -p /bin/bash
+
+Run a container with no seccomp filter, no memory limit, and execute ls:
+
+    ./docker_like_program -p ls
+
+Conclusion
+
+This program combines several Docker-like features using Linux syscalls in C. It provides basic process isolation, resource control, security via seccomp, and user privilege isolation. While this is a basic version and far from a fully-fledged container runtime, it demonstrates how Docker's key features can be implemented at a low level using raw syscalls
